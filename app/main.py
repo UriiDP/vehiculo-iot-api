@@ -1,22 +1,27 @@
+import os
 import asyncio
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.openapi.docs import get_swagger_ui_html
 
 from app.models.estado import Estado, MovimientoRequest
 from app.services.status_service import StatusService
 from app.websocket.websocket_manager import WebSocketManager
 
-# Intento de importación del módulo de conexión a base de datos RDS
-try:
-    from app.database import DatabaseConnection
-except ImportError:
-    DatabaseConnection = None
-
+# Inicializamos FastAPI desactivando el docs_url por defecto para personalizarlo
 app = FastAPI(
     title="API Vehículo IoT",
-    description="API HTTP y WebSocket con Amazon RDS - Práctica 2.5",
-    version="1.0.0"
+    description="""
+### 🚘 Servidor IoT - Control de Excavadora RC
+API HTTP y WebSocket con Amazon RDS - Práctica 2.5
+
+[📱 ABRIR PANEL DE CONTROL REMOTO (PC / CELULAR)](/control-panel)
+""",
+    version="1.0.0",
+    docs_url=None  # Desactivado para usar nuestro Swagger UI personalizado
 )
 
 app.add_middleware(
@@ -27,8 +32,75 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Montar carpeta de archivos estáticos
+static_path = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_path):
+    app.mount("/static", StaticFiles(directory=static_path), name="static")
+
 status_service = StatusService()
 websocket_manager = WebSocketManager()
+
+# ============================================================================
+# SWAGGER UI PERSONALIZADO CON BOTÓN DESTACADO AMARILLO
+# ============================================================================
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    html_response = get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title="API Vehículo IoT - Swagger UI"
+    )
+    
+    # Inyectamos estilos CSS para convertir el enlace en un Botón Amarillo 3D
+    custom_styles_and_scripts = """
+    <style>
+        .swagger-ui .description a[href*="control-panel"] {
+            display: inline-block !important;
+            background: linear-gradient(135deg, #ffb703 0%, #fb8500 100%) !important;
+            color: #000000 !important;
+            font-weight: 800 !important;
+            font-size: 15px !important;
+            padding: 12px 24px !important;
+            border-radius: 8px !important;
+            text-decoration: none !important;
+            box-shadow: 0 4px 12px rgba(251, 133, 0, 0.4) !important;
+            border: 2px solid #e07a00 !important;
+            margin-top: 14px !important;
+            margin-bottom: 10px !important;
+            transition: all 0.2s ease-in-out !important;
+            cursor: pointer !important;
+            font-family: sans-serif !important;
+        }
+        .swagger-ui .description a[href*="control-panel"]:hover {
+            transform: translateY(-2px) scale(1.02) !important;
+            box-shadow: 0 6px 18px rgba(251, 133, 0, 0.6) !important;
+            background: linear-gradient(135deg, #ffc324 0%, #ff9100 100%) !important;
+        }
+    </style>
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            var checkInterval = setInterval(function() {
+                var btn = document.querySelector('.swagger-ui .description a[href*="control-panel"]');
+                if (btn) {
+                    btn.setAttribute('target', '_blank');
+                    clearInterval(checkInterval);
+                }
+            }, 200);
+        });
+    </script>
+    """
+    
+    content = html_response.body.decode("utf-8").replace("</head>", f"{custom_styles_and_scripts}</head>")
+    return HTMLResponse(content=content)
+
+# ============================================================================
+# ENDPOINT DE PANEL DE CONTROL WEB
+# ============================================================================
+@app.get("/control-panel", response_class=HTMLResponse, include_in_schema=False)
+def abrir_panel_control():
+    index_file = os.path.join(static_path, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
+    return HTMLResponse("<h2>Error: No se encontró la interfaz web en static/index.html</h2>")
 
 # ============================================================================
 # 1. SECCIÓN: VEHÍCULOS (5 SPs)

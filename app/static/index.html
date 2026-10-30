@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>RC Excavator - Control Pro Responsivo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background-color: #0d0d0d;
+      color: #ffffff;
+      font-family: 'Courier New', Courier, monospace;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #app-viewport {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    canvas {
+      display: block;
+      touch-action: none;
+      box-shadow: 0 0 25px rgba(0,0,0,0.9);
+    }
+
+    /* Adaptación PC / Laptop (Landscape) */
+    @media (min-aspect-ratio: 1/1) {
+      canvas {
+        height: 98vh;
+        width: auto;
+        max-width: 100vw;
+        aspect-ratio: 1000 / 750;
+      }
+    }
+
+    /* Adaptación Smartphone (Portrait) */
+    @media (max-aspect-ratio: 1/1) {
+      canvas {
+        width: 98vw;
+        height: auto;
+        max-height: 98vh;
+        aspect-ratio: 500 / 880;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="app-viewport">
+    <canvas id="gameCanvas"></canvas>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Conexión WebSocket
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/1`;
+    let socket;
+    let wsConectado = false;
+
+    let esVertical = false;
+    let teclasActivas = new Set();
+    let progresoSistemas = { BRAZO: 0, CUCHARA: 0, GIRO: 0, PLUMA: 0 };
+
+    // Coordenadas y radios de botones
+    const btnData = [
+      // D-Pad Izquierdo / Superior (W, A, S, D)
+      { key: 'KeyW', cmd: 11, lbl: 'W', sys: 'BRAZO', landscape: {x: 280, y: 535, r: 22}, portrait: {x: 250, y: 405, r: 26} },
+      { key: 'KeyS', cmd: 12, lbl: 'S', sys: 'BRAZO', landscape: {x: 280, y: 705, r: 22}, portrait: {x: 250, y: 575, r: 26} },
+      { key: 'KeyA', cmd: 13, lbl: 'A', sys: 'GIRO',  landscape: {x: 195, y: 620, r: 22}, portrait: {x: 165, y: 490, r: 26} },
+      { key: 'KeyD', cmd: 14, lbl: 'D', sys: 'GIRO',  landscape: {x: 365, y: 620, r: 22}, portrait: {x: 335, y: 490, r: 26} },
+
+      // Botones Centrales en PC / Lateral en Móvil
+      { key: 'Space', cmd: 20, lbl: 'PWR', sys: 'PLUMA', landscape: {x: 500, y: 565, r: 22}, portrait: {x: 75,  y: 630, r: 24} },
+      { key: 'KeyV',  cmd: 19, lbl: 'V',   sys: 'PLUMA', landscape: {x: 440, y: 635, r: 22}, portrait: {x: 425, y: 570, r: 24} },
+      { key: 'KeyM',  cmd: 21, lbl: 'M',   sys: 'PLUMA', landscape: {x: 500, y: 635, r: 22}, portrait: {x: 425, y: 630, r: 24} },
+      { key: 'KeyX',  cmd: 'DEMO', lbl: 'X', sys: 'PLUMA', landscape: {x: 560, y: 635, r: 22}, portrait: {x: 425, y: 690, r: 24} },
+
+      // D-Pad Derecho / Inferior (◄, ►, ▲, ▼)
+      { key: 'ArrowLeft',  cmd: 15, lbl: '◄', sys: 'GIRO',    landscape: {x: 635, y: 620, r: 22}, portrait: {x: 165, y: 750, r: 26} },
+      { key: 'ArrowRight', cmd: 16, lbl: '►', sys: 'GIRO',    landscape: {x: 805, y: 620, r: 22}, portrait: {x: 335, y: 750, r: 26} },
+      { key: 'ArrowUp',    cmd: 17, lbl: '▲', sys: 'CUCHARA', landscape: {x: 720, y: 535, r: 22}, portrait: {x: 250, y: 665, r: 26} },
+      { key: 'ArrowDown',  cmd: 18, lbl: '▼', sys: 'CUCHARA', landscape: {x: 720, y: 705, r: 22}, portrait: {x: 250, y: 835, r: 26} }
+    ];
+
+    // Nubes
+    class Nube {
+      constructor(x, y, size) {
+        this.x = x; this.y = y; this.size = size;
+        this.speed = 0.2 + Math.random() * 0.3;
+      }
+      dibujar(limitX) {
+        this.x += this.speed;
+        if (this.x > limitX + 50) this.x = -80;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(this.x, this.y, this.size, this.size / 2);
+        ctx.beginPath();
+        ctx.arc(this.x, this.y + this.size / 4, this.size / 4, 0, Math.PI * 2);
+        ctx.arc(this.x + this.size, this.y + this.size / 4, this.size / 4, 0, Math.PI * 2);
+        ctx.arc(this.x + this.size / 2, this.y, this.size / 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Trabajadores animables
+    class Trabajador {
+      constructor(x, y) {
+        this.x = x; this.y = y; this.startX = x; this.dir = 1; this.frame = 0;
+      }
+      dibujar(scale = 1.0) {
+        this.x += 0.3 * this.dir;
+        if (Math.abs(this.x - this.startX) > 40) this.dir *= -1;
+        this.frame += 0.1;
+        let rebote = Math.sin(this.frame) * 2;
+
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.scale(scale, scale);
+
+        ctx.fillStyle = "#1e3c78";
+        ctx.fillRect(0, 15 + rebote, 4, 12);
+        ctx.fillRect(8, 15 - rebote, 4, 12);
+
+        ctx.fillStyle = "#f06414";
+        ctx.fillRect(-2, 0, 16, 16);
+
+        ctx.fillStyle = "#ffcc00";
+        ctx.beginPath();
+        ctx.arc(6, -4 + rebote, 7, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      }
+    }
+
+    const nubesLandscape = [new Nube(100, 60, 80), new Nube(600, 100, 100), new Nube(850, 40, 70)];
+    const nubesPortrait = [new Nube(30, 68, 55), new Nube(280, 85, 65)];
+    const trabajadoresLandscape = [new Trabajador(180, 375), new Trabajador(800, 375)];
+    const trabajadoresPortrait = [new Trabajador(70, 225), new Trabajador(390, 225)];
+
+    function ajustarDimensiones() {
+      esVertical = window.innerHeight > window.innerWidth;
+      if (esVertical) {
+        canvas.width = 500;
+        canvas.height = 880;
+      } else {
+        canvas.width = 1000;
+        canvas.height = 750;
+      }
+    }
+
+    window.addEventListener('resize', ajustarDimensiones);
+    ajustarDimensiones();
+
+    // ============================================================================
+    // RENDERIZADO PC (LANDSCAPE)
+    // ============================================================================
+    function renderLandscape() {
+      ctx.fillStyle = "#4a9bd6"; ctx.fillRect(0, 0, 1000, 750);
+      ctx.fillStyle = "#ffcc00"; ctx.beginPath(); ctx.arc(920, 80, 35, 0, Math.PI * 2); ctx.fill();
+      nubesLandscape.forEach(n => n.dibujar(1000));
+
+      const edificios = [[20, 150, 120, 250], [180, 200, 140, 200], [450, 100, 180, 300], [680, 180, 100, 220], [820, 120, 150, 280]];
+      edificios.forEach(([bx, by, bw, bh]) => {
+        ctx.fillStyle = "#828c96"; ctx.fillRect(bx, by, bw, bh);
+        ctx.fillStyle = "#aab4be";
+        for (let wx = bx + 15; wx < bx + bw - 15; wx += 25) {
+          for (let wy = by + 20; wy < by + bh - 20; wy += 30) ctx.fillRect(wx, wy, 12, 16);
+        }
+      });
+
+      ctx.fillStyle = "#8c552d"; ctx.fillRect(0, 400, 1000, 350);
+      ctx.fillStyle = "#5a3219";
+      ctx.beginPath(); ctx.ellipse(405, 420, 125, 40, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(70, 425, 90, 35, 0, 0, Math.PI * 2); ctx.fill();
+
+      [[880, 410], [930, 410], [905, 375]].forEach(([tx, ty]) => {
+        ctx.fillStyle = "#505055"; ctx.beginPath(); ctx.arc(tx, ty, 25, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#141414"; ctx.beginPath(); ctx.arc(tx, ty, 18, 0, Math.PI * 2); ctx.fill();
+      });
+
+      [[140, 410], [650, 400]].forEach(([cx, cy]) => {
+        ctx.fillStyle = "#f06414";
+        ctx.beginPath(); ctx.moveTo(cx, cy + 25); ctx.lineTo(cx + 12, cy); ctx.lineTo(cx + 24, cy + 25); ctx.fill();
+        ctx.fillStyle = "#ffffff"; ctx.fillRect(cx + 4, cy + 10, 16, 6);
+      });
+
+      ctx.fillStyle = "#ffcc00"; ctx.fillRect(730, 50, 20, 350); ctx.fillRect(650, 120, 250, 15);
+      ctx.strokeStyle = "#323232"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(670, 135); ctx.lineTo(670, 280); ctx.stroke();
+
+      dibujarExcavadora(440, 360, 1.0);
+      trabajadoresLandscape.forEach(t => t.dibujar(1.0));
+
+      dibujarTelemetriaLandscape();
+      dibujarControlLandscape();
+    }
+
+    function dibujarTelemetriaLandscape() {
+      const time = Date.now();
+
+      ctx.fillStyle = "#191919"; ctx.beginPath(); ctx.roundRect(20, 20, 240, 120, 5); ctx.fill();
+      ctx.strokeStyle = "#ffcc00"; ctx.lineWidth = 3; ctx.stroke();
+
+      ctx.font = "bold 15px Courier New"; ctx.fillStyle = "#c8c8c8"; ctx.fillText("ESTADO:", 30, 45);
+      
+      if (wsConectado) {
+        ctx.fillStyle = "#ffcc00"; ctx.fillText("ONLINE (WS AWS)", 100, 45);
+        if (time % 1000 < 700) {
+          ctx.fillStyle = "#00c850"; ctx.beginPath(); ctx.arc(245, 40, 6, 0, Math.PI * 2); ctx.fill();
+        }
+      } else {
+        ctx.fillStyle = "#ff5050"; ctx.fillText("OFFLINE", 100, 45);
+        if (time % 1000 < 500) {
+          ctx.fillStyle = "#ff5050"; ctx.beginPath(); ctx.arc(175, 40, 6, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+
+      ctx.fillStyle = "#c8c8c8";
+      ctx.fillText("VOLTAJE: 3.0V", 30, 75);
+      ctx.fillText("SEÑAL:", 30, 105);
+
+      for (let i = 0; i < 4; i++) {
+        ctx.fillStyle = (wsConectado && i < 4) ? "#00c850" : "#323232";
+        ctx.fillRect(100 + (i * 12), 105 - (i * 6), 8, 10 + (i * 6));
+      }
+
+      ctx.fillStyle = "#191919"; ctx.beginPath(); ctx.roundRect(740, 20, 240, 140, 5); ctx.fill();
+      ctx.strokeStyle = "#ffcc00"; ctx.lineWidth = 3; ctx.stroke();
+      ctx.fillStyle = "#ffcc00"; ctx.fillText("ACTUADORES RC", 790, 45);
+
+      let idx = 0;
+      for (let [sis, valor] of Object.entries(progresoSistemas)) {
+        ctx.font = "bold 13px Courier New"; ctx.fillStyle = "#c8c8c8"; ctx.fillText(sis, 755, 75 + (idx * 20));
+        ctx.fillStyle = "#323232"; ctx.fillRect(830, 67 + (idx * 20), 130, 10);
+        if (valor > 0) { ctx.fillStyle = "#00c850"; ctx.fillRect(830, 67 + (idx * 20), valor, 10); }
+        idx++;
+      }
+    }
+
+    function dibujarControlLandscape() {
+      // Antenas
+      ctx.fillStyle = "#191919";
+      ctx.beginPath(); ctx.roundRect(230, 420, 24, 70, 4); ctx.fill();
+      ctx.beginPath(); ctx.roundRect(746, 420, 24, 70, 4); ctx.fill();
+      ctx.strokeStyle = "#505050"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(230, 440); ctx.lineTo(254, 440); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(746, 440); ctx.lineTo(770, 440); ctx.stroke();
+
+      // Mando Poligonal Base
+      const pts = [[180, 480], [820, 480], [950, 560], [950, 740], [820, 820], [180, 820], [50, 740], [50, 560]];
+      ctx.fillStyle = "#ffcc00"; ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath(); ctx.fill(); ctx.strokeStyle = "#191919"; ctx.lineWidth = 5; ctx.stroke();
+
+      // Grips laterales
+      [590, 620, 650, 680].forEach(y => {
+        ctx.beginPath(); ctx.moveTo(65, y); ctx.lineTo(105, y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(895, y); ctx.lineTo(935, y); ctx.stroke();
+      });
+
+      // Letrero EXCAVADORA URI
+      ctx.fillStyle = "#191919"; ctx.beginPath();
+      ctx.moveTo(380, 480); ctx.lineTo(620, 480); ctx.lineTo(590, 530); ctx.lineTo(410, 530); ctx.fill();
+      ctx.fillStyle = "#ffcc00"; ctx.font = "bold 20px Courier New"; ctx.fillText("EXCAVADORA URI", 420, 512);
+
+      // LED Rojo en chasis amarillo (x: 815, y: 505)
+      dibujarLedEstado(815, 505);
+
+      // Anillos D-Pad Negros PC
+      [280, 720].forEach(cx => {
+        ctx.fillStyle = "#191919"; ctx.beginPath(); ctx.arc(cx, 620, 125, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#ffcc00"; ctx.beginPath(); ctx.arc(cx, 620, 55, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#191919"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(cx, 620, 55, 0, Math.PI * 2); ctx.stroke();
+      });
+
+      renderizarBotones(false);
+    }
+
+    // ============================================================================
+    // RENDERIZADO MÓVIL (PORTRAIT)
+    // ============================================================================
+    function renderPortrait() {
+      const time = Date.now();
+      ctx.fillStyle = "#4a9bd6"; ctx.fillRect(0, 0, 500, 880);
+      nubesPortrait.forEach(n => n.dibujar(500));
+
+      const edificios = [[10, 110, 80, 140], [100, 140, 90, 110], [210, 90, 100, 160], [330, 120, 80, 130], [420, 100, 70, 150]];
+      edificios.forEach(([bx, by, bw, bh]) => {
+        ctx.fillStyle = "#828c96"; ctx.fillRect(bx, by, bw, bh);
+        ctx.fillStyle = "#aab4be";
+        for (let wx = bx + 8; wx < bx + bw - 10; wx += 16) {
+          for (let wy = by + 12; wy < by + bh - 12; wy += 20) ctx.fillRect(wx, wy, 8, 10);
+        }
+      });
+
+      ctx.fillStyle = "#8c552d"; ctx.fillRect(0, 240, 500, 640);
+      ctx.fillStyle = "#5a3219";
+      ctx.beginPath(); ctx.ellipse(200, 250, 70, 20, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(30, 255, 50, 18, 0, 0, Math.PI * 2); ctx.fill();
+
+      // Tubos en móvil
+      [[420, 245], [450, 245], [435, 222]].forEach(([tx, ty]) => {
+        ctx.fillStyle = "#505055"; ctx.beginPath(); ctx.arc(tx, ty, 15, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#141414"; ctx.beginPath(); ctx.arc(tx, ty, 10, 0, Math.PI * 2); ctx.fill();
+      });
+
+      // Conos en móvil
+      [[110, 248], [340, 248]].forEach(([cx, cy]) => {
+        ctx.fillStyle = "#f06414";
+        ctx.beginPath(); ctx.moveTo(cx, cy + 15); ctx.lineTo(cx + 8, cy); ctx.lineTo(cx + 16, cy + 15); ctx.fill();
+        ctx.fillStyle = "#ffffff"; ctx.fillRect(cx + 3, cy + 6, 10, 4);
+      });
+
+      // Grúa móvil
+      ctx.fillStyle = "#ffcc00"; ctx.fillRect(380, 60, 12, 180); ctx.fillRect(330, 95, 140, 10);
+      ctx.strokeStyle = "#323232"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(350, 105); ctx.lineTo(350, 180); ctx.stroke();
+
+      dibujarExcavadora(250, 220, 0.75);
+      trabajadoresPortrait.forEach(t => t.dibujar(0.75));
+
+      // Bar de Estado Móvil con Parpadeo
+      ctx.fillStyle = "#191919"; ctx.beginPath(); ctx.roundRect(15, 12, 470, 48, 8); ctx.fill();
+      ctx.strokeStyle = "#ffcc00"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.font = "bold 14px Courier New";
+      
+      if (wsConectado) {
+        ctx.fillStyle = "#00ffc8"; ctx.fillText("ESTADO: ONLINE (WS AWS)", 30, 41);
+        if (time % 1000 < 700) {
+          ctx.fillStyle = "#00c850"; ctx.beginPath(); ctx.arc(275, 36, 6, 0, Math.PI * 2); ctx.fill();
+        }
+      } else {
+        ctx.fillStyle = "#ff5050"; ctx.fillText("ESTADO: OFFLINE (DESCONECTADO)", 30, 41);
+        if (time % 1000 < 500) {
+          ctx.fillStyle = "#ff5050"; ctx.beginPath(); ctx.arc(325, 36, 6, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+
+      // Antenas Móvil
+      ctx.fillStyle = "#191919";
+      ctx.beginPath(); ctx.roundRect(110, 290, 18, 50, 4); ctx.fill();
+      ctx.beginPath(); ctx.roundRect(372, 290, 18, 50, 4); ctx.fill();
+
+      // Mando Vertical
+      ctx.fillStyle = "#ffcc00"; ctx.beginPath(); ctx.roundRect(15, 330, 470, 530, 20); ctx.fill();
+      ctx.strokeStyle = "#191919"; ctx.lineWidth = 5; ctx.stroke();
+
+      // Grips laterales
+      [410, 440, 470, 500, 700, 730, 760, 790].forEach(y => {
+        ctx.beginPath(); ctx.moveTo(25, y); ctx.lineTo(45, y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(455, y); ctx.lineTo(475, y); ctx.stroke();
+      });
+
+      // Letrero negro móvil
+      ctx.fillStyle = "#191919"; ctx.fillRect(100, 340, 300, 35);
+      ctx.fillStyle = "#ffcc00"; ctx.font = "bold 16px Courier New"; ctx.fillText("EXCAVADORA URI (MOBILE)", 130, 363);
+
+      // LED Rojo en Esquina Superior Derecha del Mando Móvil
+      dibujarLedEstado(435, 358);
+
+      // Anillos D-Pad Negros Móvil
+      [ {x: 250, y: 490}, {x: 250, y: 750} ].forEach(pos => {
+        ctx.fillStyle = "#191919"; ctx.beginPath(); ctx.arc(pos.x, pos.y, 105, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#ffcc00"; ctx.beginPath(); ctx.arc(pos.x, pos.y, 45, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#191919"; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(pos.x, pos.y, 45, 0, Math.PI * 2); ctx.stroke();
+      });
+
+      renderizarBotones(true);
+    }
+
+    // LED Rojo Inteligente
+    function dibujarLedEstado(x, y) {
+      const time = Date.now();
+      let color = "#500000";
+      let halo = false;
+
+      if (!wsConectado) {
+        color = (time % 1000 < 500) ? "#ff0000" : "#400000";
+      } else {
+        if (teclasActivas.size > 0) {
+          color = "#ff3333";
+          halo = true;
+        } else {
+          color = "#d00000";
+        }
+      }
+
+      ctx.fillStyle = "#191919"; ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.fill();
+      
+      if (halo) {
+        ctx.fillStyle = "rgba(255, 50, 50, 0.5)";
+        ctx.beginPath(); ctx.arc(x, y, 17, 0, Math.PI * 2); ctx.fill();
+      }
+
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgba(255, 255, 255, 0.6)";
+      ctx.beginPath(); ctx.arc(x - 2, y - 2, 2, 0, Math.PI * 2); ctx.fill();
+    }
+
+    function dibujarExcavadora(x, y, scale) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+
+      ctx.fillStyle = "#282828"; ctx.beginPath(); ctx.roundRect(0, 0, 160, 40, 20); ctx.fill();
+      ctx.fillStyle = "#646464";
+      for (let i = 0; i < 5; i++) { ctx.beginPath(); ctx.arc(30 + (i * 25), 20, 12, 0, Math.PI * 2); ctx.fill(); }
+
+      ctx.fillStyle = "#ffcc00"; ctx.beginPath();
+      ctx.moveTo(10, 0); ctx.lineTo(130, 0); ctx.lineTo(140, -50); ctx.lineTo(0, -50); ctx.fill();
+
+      ctx.fillStyle = "#0a0a0a"; ctx.beginPath(); ctx.roundRect(80, -65, 45, 65, 5); ctx.fill();
+      ctx.fillStyle = "#78b4dc"; ctx.fillRect(85, -60, 25, 30);
+
+      ctx.fillStyle = "#ffcc00"; ctx.beginPath();
+      ctx.moveTo(30, -40); ctx.lineTo(-50, -130); ctx.lineTo(-30, -140); ctx.lineTo(50, -30); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-40, -135); ctx.lineTo(-100, -40); ctx.lineTo(-80, -30); ctx.lineTo(-25, -125); ctx.fill();
+
+      ctx.fillStyle = "#3c3c3c"; ctx.beginPath();
+      ctx.moveTo(-95, -35); ctx.lineTo(-130, -10); ctx.lineTo(-140, -40); ctx.lineTo(-110, -50); ctx.fill();
+
+      ctx.restore();
+    }
+
+    function renderizarBotones(isPortrait) {
+      btnData.forEach(btn => {
+        const pos = isPortrait ? btn.portrait : btn.landscape;
+        const radius = pos.r || 22;
+        const activo = Array.from(teclasActivas).some(b => b.cmd === btn.cmd);
+        const offset = activo ? 4 : 0;
+
+        ctx.fillStyle = "#505050"; ctx.beginPath(); ctx.arc(pos.x, pos.y + 4, radius, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = activo ? "#00ffc8" : "#d2d7dc"; ctx.beginPath(); ctx.arc(pos.x, pos.y + offset, radius, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#191919"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(pos.x, pos.y + offset, radius, 0, Math.PI * 2); ctx.stroke();
+
+        ctx.fillStyle = "#191919"; ctx.font = `bold ${radius > 24 ? '15px' : '13px'} Courier New`;
+        const tw = ctx.measureText(btn.lbl).width;
+        ctx.fillText(btn.lbl, pos.x - (tw / 2), pos.y + offset + 5);
+      });
+    }
+
+    function render() {
+      for (let sis in progresoSistemas) { if (progresoSistemas[sis] > 0) progresoSistemas[sis] -= 2; }
+      teclasActivas.forEach(btn => { if (btn.sys && progresoSistemas[btn.sys] < 130) progresoSistemas[btn.sys] += 6; });
+
+      if (esVertical) renderPortrait();
+      else renderLandscape();
+
+      requestAnimationFrame(render);
+    }
+
+    // ENVÍO DE ACCIONES AL SERVIDOR (INICIO Y PARO)
+    async function enviarComando(cmdId) {
+      if (cmdId === 'DEMO') {
+        fetch('/demos/1/ejecutar?id_vehiculo=1', { method: 'POST' });
+      } else {
+        fetch('/vehiculos/movimiento', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id_vehiculo: 1, id_comando: cmdId, origen: "WEB_PANEL" })
+        });
+      }
+    }
+
+    // EVENTOS DE TECLADO (PC)
+    window.addEventListener('keydown', (e) => {
+      const btn = btnData.find(b => b.key === e.code);
+      if (btn && !Array.from(teclasActivas).some(b => b.cmd === btn.cmd)) {
+        teclasActivas.add(btn);
+        enviarComando(btn.cmd); // Enviar comando activo (ej. 11, 12, etc.)
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const btn = btnData.find(b => b.key === e.code);
+      if (btn) {
+        teclasActivas.forEach(b => { if (b.cmd === btn.cmd) teclasActivas.delete(b); });
+        enviarComando(0); // Enviar comando 0 (PARO / DETENER) al soltar
+      }
+    });
+
+    function getCanvasCoords(e) {
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+    }
+
+    // EVENTOS TÁCTILES / MOUSE (MÓVIL Y PC)
+    function handleStart(e) {
+      e.preventDefault();
+      const coords = getCanvasCoords(e);
+      btnData.forEach(btn => {
+        const pos = esVertical ? btn.portrait : btn.landscape;
+        const radius = pos.r || 22;
+        const dist = Math.hypot(coords.x - pos.x, coords.y - pos.y);
+        if (dist <= radius + 4) {
+          if (!Array.from(teclasActivas).some(b => b.cmd === btn.cmd)) {
+            teclasActivas.add(btn);
+            enviarComando(btn.cmd); // Enviar comando activo al pulsar
+          }
+        }
+      });
+    }
+
+    function handleEnd(e) { 
+      e.preventDefault(); 
+      if (teclasActivas.size > 0) {
+        teclasActivas.clear(); 
+        enviarComando(0); // Enviar comando 0 (PARO / DETENER) al soltar la pantalla o clic
+      }
+    }
+
+    canvas.addEventListener('mousedown', handleStart);
+    canvas.addEventListener('mouseup', handleEnd);
+    canvas.addEventListener('touchstart', handleStart);
+    canvas.addEventListener('touchend', handleEnd);
+    canvas.addEventListener('touchcancel', handleEnd);
+
+    function conectarWS() {
+      socket = new WebSocket(wsUrl);
+      socket.onopen = () => { wsConectado = true; };
+      socket.onclose = () => { wsConectado = false; setTimeout(conectarWS, 3000); };
+    }
+
+    conectarWS();
+    render();
+  </script>
+</body>
+</html>
